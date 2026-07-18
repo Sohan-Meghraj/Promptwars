@@ -32,6 +32,8 @@ const DEFAULT_CONNECTION: LocalConnectionState = {
 
 const MAX_PENDING_GATES = 100;
 const MAX_LOCAL_EVENTS = 1_000;
+export const MAX_REMOTE_EVENTS = 500;
+export const MAX_REMOTE_EVENT_ATTEMPTS = 8;
 
 function isInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value);
@@ -209,7 +211,7 @@ function parseQueuedEvents(value: unknown): QueuedEvent[] {
     const nextAttemptAt = parseDate(raw?.nextAttemptAt);
     if (!event || !event.gateId || !isInteger(attempts) || attempts < 0 || !nextAttemptAt) return [];
     return [{ event, attempts, nextAttemptAt }];
-  });
+  }).slice(-MAX_REMOTE_EVENTS);
 }
 
 export async function loadSnapshot(): Promise<ExtensionSnapshot> {
@@ -310,7 +312,7 @@ export function enqueueRemoteEvent(event: LocalEvent): Promise<void> {
       [STORAGE_KEYS.remoteEventQueue]: [
         ...queue,
         { event, attempts: 0, nextAttemptAt: new Date().toISOString() },
-      ],
+      ].slice(-MAX_REMOTE_EVENTS),
     });
   });
   queueWrite = write.catch(() => undefined);
@@ -335,13 +337,14 @@ export function removeQueuedRemoteEvent(clientEventId: string): Promise<void> {
 }
 
 export function retryQueuedRemoteEvent(clientEventId: string, attempts: number): Promise<void> {
-  const backoffMs = Math.min(5_000 * 2 ** Math.min(attempts, 6), 5 * 60_000);
+  const boundedAttempts = Math.min(Math.max(attempts, 0), MAX_REMOTE_EVENT_ATTEMPTS);
+  const backoffMs = Math.min(5_000 * 2 ** Math.min(boundedAttempts, 6), 5 * 60_000);
   const write = queueWrite.then(async () => {
     const stored = await chrome.storage.local.get(STORAGE_KEYS.remoteEventQueue);
     const queue = parseQueuedEvents(stored[STORAGE_KEYS.remoteEventQueue]);
     const next = queue.map((item) =>
-      item.event.clientEventId === clientEventId
-        ? { ...item, attempts, nextAttemptAt: new Date(Date.now() + backoffMs).toISOString() }
+        item.event.clientEventId === clientEventId
+        ? { ...item, attempts: boundedAttempts, nextAttemptAt: new Date(Date.now() + backoffMs).toISOString() }
         : item,
     );
     await chrome.storage.local.set({ [STORAGE_KEYS.remoteEventQueue]: next });

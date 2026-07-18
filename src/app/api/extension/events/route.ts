@@ -2,14 +2,17 @@ import { NextResponse } from "next/server";
 
 import { getExtensionConnection, isExtensionServerConfigured } from "@/lib/extension-auth";
 import {
-  chooseInitialStrategy,
+  chooseAdaptiveStrategy,
   eventTypeForDatabase,
   getLocalHour,
   outcomeForEvent,
+  timeBucketForHour,
   type DatabaseRestriction,
+  type StrategyScore,
 } from "@/lib/extension-contract";
 import { extensionEventSchema } from "@/lib/schemas";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { consumeRateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -17,6 +20,13 @@ type RestrictionAttempt = {
   id: string;
   restriction_id: string;
   strategy: string;
+};
+
+type StrategyScoreRow = {
+  strategy: StrategyScore["strategy"];
+  attempt_count: number;
+  successful_interruptions: number;
+  effectiveness_score: number | string;
 };
 
 async function findAttempt(
@@ -40,6 +50,13 @@ export async function POST(request: Request) {
   }
   const connection = await getExtensionConnection(request);
   if (!connection) return NextResponse.json({ error: "Unauthorized browser connection." }, { status: 401 });
+  const rate = consumeRateLimit(`events:${connection.user_id}:${connection.id}`, 180, 60_000);
+  if (!rate.allowed) {
+    return NextResponse.json({ error: "Too many extension events. Please retry shortly." }, {
+      status: 429,
+      headers: { "Retry-After": String(rate.retryAfterSeconds) },
+    });
+  }
 
   const parsed = extensionEventSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: "Invalid extension event." }, { status: 400 });
@@ -61,12 +78,31 @@ export async function POST(request: Request) {
 
   if (event.eventType === "gate_detected") {
     if (!attemptId) return NextResponse.json({ error: "A gate id is required when an attempt starts." }, { status: 400 });
-    const { count } = await admin
-      .from("restriction_attempts")
-      .select("id", { count: "exact", head: true })
-      .eq("user_id", connection.user_id)
-      .eq("restriction_id", rule.id);
-    const strategy = chooseInitialStrategy((count ?? 0) + 1);
+    const localHour = getLocalHour(rule.timezone);
+    const timeBucket = timeBucketForHour(localHour);
+    const [{ count, error: countError }, { data: scoreRows, error: scoreError }] = await Promise.all([
+      admin
+        .from("restriction_attempts")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", connection.user_id)
+        .eq("restriction_id", rule.id),
+      admin
+        .from("strategy_scores")
+        .select("strategy, attempt_count, successful_interruptions, effectiveness_score")
+        .eq("user_id", connection.user_id)
+        .eq("domain", rule.domain)
+        .eq("time_bucket", timeBucket),
+    ]);
+    if (countError || scoreError) {
+      return NextResponse.json({ error: "Unable to select an intervention strategy." }, { status: 500 });
+    }
+    const scores: StrategyScore[] = ((scoreRows ?? []) as StrategyScoreRow[]).map((score) => ({
+      strategy: score.strategy,
+      attemptCount: score.attempt_count,
+      successfulInterruptions: score.successful_interruptions,
+      effectivenessScore: Number(score.effectiveness_score),
+    }));
+    const strategy = chooseAdaptiveStrategy((count ?? 0) + 1, scores);
     const { error: createError } = await admin.from("restriction_attempts").insert({
       id: attemptId,
       user_id: connection.user_id,
@@ -76,7 +112,7 @@ export async function POST(request: Request) {
       strategy,
       client_event_id: event.clientEventId,
       local_timezone: rule.timezone,
-      local_hour: getLocalHour(rule.timezone),
+      local_hour: localHour,
       attempted_at: event.occurredAt,
     });
 
@@ -113,11 +149,12 @@ export async function POST(request: Request) {
 
   const outcome = outcomeForEvent(event.eventType);
   if (outcome) {
-    const { error: outcomeError } = await admin
-      .from("restriction_attempts")
-      .update({ final_outcome: outcome, resolved_at: event.occurredAt })
-      .eq("id", attempt.id)
-      .eq("user_id", connection.user_id);
+    const { error: outcomeError } = await admin.rpc("resolve_restriction_attempt_outcome", {
+      p_attempt_id: attempt.id,
+      p_user_id: connection.user_id,
+      p_outcome: outcome,
+      p_occurred_at: event.occurredAt,
+    });
     if (outcomeError) return NextResponse.json({ error: "Unable to resolve the restriction attempt." }, { status: 500 });
   }
 

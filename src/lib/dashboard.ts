@@ -2,6 +2,7 @@ import "server-only";
 
 import { isRuleActive } from "@/lib/schedule";
 import { createClient } from "@/lib/supabase/server";
+import { ADAPTIVE_STRATEGIES } from "@/lib/extension-contract";
 import type { RestrictionRule, Tone } from "@/lib/types";
 
 type RawRule = {
@@ -38,6 +39,12 @@ export type TodayDashboard = {
   rules: RestrictionRule[];
   activeRules: RestrictionRule[];
   recentActivity: RecentActivity[];
+  connectedBrowser: ConnectedBrowser | null;
+  metrics: {
+    attempts: number;
+    returnsToFocus: number;
+    intentionalAccess: number;
+  };
   setupError: boolean;
 };
 
@@ -54,6 +61,31 @@ export type ProfileSettings = {
   timezone: string;
   defaultTone: Tone;
   focusDestination: string | null;
+};
+
+type RawStrategyScore = {
+  domain: string;
+  time_bucket: string;
+  strategy: string;
+  attempt_count: number;
+  successful_interruptions: number;
+  effectiveness_score: number | string;
+};
+
+export type StrategyInsight = {
+  domain: string;
+  strategy: string;
+  attemptCount: number;
+  successfulInterruptions: number;
+  effectivenessScore: number;
+};
+
+export type InsightSnapshot = {
+  attempts: number;
+  returnsToFocus: number;
+  intentionalAccess: number;
+  bestSupportedStrategy: StrategyInsight | null;
+  setupError: boolean;
 };
 
 function mapRule(row: RawRule): RestrictionRule {
@@ -77,13 +109,30 @@ function mapRule(row: RawRule): RestrictionRule {
 
 export async function getTodayDashboard(): Promise<TodayDashboard> {
   const supabase = await createClient();
-  const [rulesResult, attemptsResult] = await Promise.all([
+  const [rulesResult, attemptsResult, browserResult, attemptsCount, returnsCount, accessCount] = await Promise.all([
     supabase.from("restrictions").select("*").order("updated_at", { ascending: false }),
     supabase.from("restriction_attempts").select("id, restriction_id, attempted_at, final_outcome").order("attempted_at", { ascending: false }).limit(8),
+    supabase
+      .from("browser_connections")
+      .select("id, nickname, extension_version, last_seen_at, last_synced_at, revoked_at")
+      .is("revoked_at", null)
+      .order("last_synced_at", { ascending: false, nullsFirst: false })
+      .limit(1)
+      .maybeSingle(),
+    supabase.from("restriction_attempts").select("id", { count: "exact", head: true }),
+    supabase.from("restriction_attempts").select("id", { count: "exact", head: true }).in("final_outcome", ["returned_to_focus", "reset_completed"]),
+    supabase.from("access_sessions").select("id", { count: "exact", head: true }),
   ]);
 
-  if (rulesResult.error || attemptsResult.error) {
-    return { rules: [], activeRules: [], recentActivity: [], setupError: true };
+  if (rulesResult.error || attemptsResult.error || browserResult.error || attemptsCount.error || returnsCount.error || accessCount.error) {
+    return {
+      rules: [],
+      activeRules: [],
+      recentActivity: [],
+      connectedBrowser: null,
+      metrics: { attempts: 0, returnsToFocus: 0, intentionalAccess: 0 },
+      setupError: true,
+    };
   }
 
   const rules = ((rulesResult.data ?? []) as RawRule[]).map(mapRule);
@@ -95,7 +144,28 @@ export async function getTodayDashboard(): Promise<TodayDashboard> {
     occurredAt: attempt.attempted_at,
   }));
 
-  return { rules, activeRules: rules.filter((rule) => isRuleActive(rule)), recentActivity, setupError: false };
+  const browser = browserResult.data;
+  return {
+    rules,
+    activeRules: rules.filter((rule) => isRuleActive(rule)),
+    recentActivity,
+    connectedBrowser: browser
+      ? {
+          id: browser.id,
+          nickname: browser.nickname,
+          extensionVersion: browser.extension_version,
+          lastSeenAt: browser.last_seen_at,
+          lastSyncedAt: browser.last_synced_at,
+          revokedAt: browser.revoked_at,
+        }
+      : null,
+    metrics: {
+      attempts: attemptsCount.count ?? 0,
+      returnsToFocus: returnsCount.count ?? 0,
+      intentionalAccess: accessCount.count ?? 0,
+    },
+    setupError: false,
+  };
 }
 
 export async function getConnectedBrowsers(): Promise<{ browsers: ConnectedBrowser[]; setupError: boolean }> {
@@ -135,13 +205,50 @@ export async function getProfileSettings(): Promise<{ settings: ProfileSettings 
   };
 }
 
-export async function getInsightSnapshot(): Promise<{ attempts: number; returnsToFocus: number; intentionalAccess: number; setupError: boolean }> {
+export async function getInsightSnapshot(): Promise<InsightSnapshot> {
   const supabase = await createClient();
-  const [attempts, returns, access] = await Promise.all([
+  const [attempts, returns, access, strategyScores] = await Promise.all([
     supabase.from("restriction_attempts").select("id", { count: "exact", head: true }),
-    supabase.from("restriction_attempts").select("id", { count: "exact", head: true }).eq("final_outcome", "returned_to_focus"),
+    supabase.from("restriction_attempts").select("id", { count: "exact", head: true }).in("final_outcome", ["returned_to_focus", "reset_completed"]),
     supabase.from("access_sessions").select("id", { count: "exact", head: true }),
+    supabase
+      .from("strategy_scores")
+      .select("domain, time_bucket, strategy, attempt_count, successful_interruptions, effectiveness_score")
+      .gte("attempt_count", 3)
+      .order("effectiveness_score", { ascending: false })
+      .order("attempt_count", { ascending: false }),
   ]);
-  if (attempts.error || returns.error || access.error) return { attempts: 0, returnsToFocus: 0, intentionalAccess: 0, setupError: true };
-  return { attempts: attempts.count ?? 0, returnsToFocus: returns.count ?? 0, intentionalAccess: access.count ?? 0, setupError: false };
+  if (attempts.error || returns.error || access.error || strategyScores.error) {
+    return { attempts: 0, returnsToFocus: 0, intentionalAccess: 0, bestSupportedStrategy: null, setupError: true };
+  }
+  const scoreRows = (strategyScores.data ?? []) as RawStrategyScore[];
+  const grouped = new Map<string, RawStrategyScore[]>();
+  for (const score of scoreRows) {
+    const key = `${score.domain}:${score.time_bucket}`;
+    const group = grouped.get(key) ?? [];
+    group.push(score);
+    grouped.set(key, group);
+  }
+  const supportedGroups = [...grouped.values()].filter((group) => {
+    const strategies = new Set(group.map((score) => score.strategy));
+    return ADAPTIVE_STRATEGIES.every((strategy) => strategies.has(strategy));
+  });
+  const best = supportedGroups
+    .flatMap((group) => group)
+    .sort((left, right) => Number(right.effectiveness_score) - Number(left.effectiveness_score) || right.attempt_count - left.attempt_count)[0] ?? null;
+  return {
+    attempts: attempts.count ?? 0,
+    returnsToFocus: returns.count ?? 0,
+    intentionalAccess: access.count ?? 0,
+    bestSupportedStrategy: best
+      ? {
+          domain: best.domain,
+          strategy: best.strategy,
+          attemptCount: best.attempt_count,
+          successfulInterruptions: best.successful_interruptions,
+          effectivenessScore: Number(best.effectiveness_score),
+        }
+      : null,
+    setupError: false,
+  };
 }

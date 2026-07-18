@@ -2,6 +2,15 @@ import "server-only";
 
 import type { Strategy, Tone } from "@/lib/types";
 
+export type TimeBucket = "morning" | "afternoon" | "evening" | "late_night";
+
+export type StrategyScore = {
+  strategy: Strategy;
+  attemptCount: number;
+  successfulInterruptions: number;
+  effectivenessScore: number;
+};
+
 export type DatabaseRestriction = {
   id: string;
   domain: string;
@@ -87,14 +96,49 @@ export function outcomeForEvent(eventType: LocalExtensionEventType): string | nu
   return outcomes[eventType] ?? null;
 }
 
-export function chooseInitialStrategy(attemptNumber: number): Strategy {
-  const cycle: Strategy[] = [
-    "goal_reminder",
-    "next_action_prompt",
-    "intentionality_question",
-    "time_remaining_reminder",
-  ];
-  return cycle[Math.max(0, attemptNumber - 1) % cycle.length];
+export const ADAPTIVE_STRATEGIES: Strategy[] = [
+  "goal_reminder",
+  "next_action_prompt",
+  "intentionality_question",
+  "time_remaining_reminder",
+];
+
+const MINIMUM_STRATEGY_SAMPLE = 3;
+
+export function timeBucketForHour(hour: number): TimeBucket {
+  if (hour < 6) return "late_night";
+  if (hour < 12) return "morning";
+  if (hour < 18) return "afternoon";
+  return "evening";
+}
+
+/**
+ * Explore each coaching approach a few times before selecting the strongest
+ * evidence-backed option for this user's domain and time of day.
+ */
+export function chooseAdaptiveStrategy(
+  attemptNumber: number,
+  scores: StrategyScore[],
+): Strategy {
+  const scoreByStrategy = new Map(scores.map((score) => [score.strategy, score]));
+  const underSampled = ADAPTIVE_STRATEGIES.filter(
+    (strategy) => (scoreByStrategy.get(strategy)?.attemptCount ?? 0) < MINIMUM_STRATEGY_SAMPLE,
+  );
+
+  if (underSampled.length > 0) {
+    return underSampled[Math.max(0, attemptNumber - 1) % underSampled.length] ?? ADAPTIVE_STRATEGIES[0]!;
+  }
+
+  return [...ADAPTIVE_STRATEGIES].sort((left, right) => {
+    const leftScore = scoreByStrategy.get(left)!;
+    const rightScore = scoreByStrategy.get(right)!;
+    return (
+      rightScore.effectivenessScore - leftScore.effectivenessScore ||
+      rightScore.successfulInterruptions - leftScore.successfulInterruptions ||
+      rightScore.attemptCount - leftScore.attemptCount ||
+      ADAPTIVE_STRATEGIES.indexOf(left) - ADAPTIVE_STRATEGIES.indexOf(right)
+    );
+  })[0]!;
 }
 
 export function getLocalHour(timezone: string): number {
