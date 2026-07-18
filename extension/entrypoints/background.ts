@@ -14,6 +14,7 @@ import {
   getQueuedRemoteEvents,
   loadRemoteCredential,
   loadSnapshot,
+  MAX_REMOTE_EVENT_ATTEMPTS,
   removeQueuedRemoteEvent,
   removePendingGate,
   retryQueuedRemoteEvent,
@@ -118,6 +119,17 @@ async function flushRemoteEvents(): Promise<Set<string>> {
         await removeQueuedRemoteEvent(next.event.clientEventId);
         delivered.add(next.event.clientEventId);
       } catch (error) {
+        if (next.attempts >= MAX_REMOTE_EVENT_ATTEMPTS) {
+          // Keep the bounded local history, but stop retrying a permanently
+          // rejected event so an offline browser cannot grow an endless queue.
+          await removeQueuedRemoteEvent(next.event.clientEventId);
+          await setConnectionStatus(
+            error instanceof RemoteRequestError && (error.status === 401 || error.status === 403)
+              ? 'session_expired'
+              : 'offline',
+          );
+          break;
+        }
         await retryQueuedRemoteEvent(next.event.clientEventId, next.attempts + 1);
         await setConnectionStatus(
           error instanceof RemoteRequestError && (error.status === 401 || error.status === 403)

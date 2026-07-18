@@ -9,6 +9,7 @@ import {
 import { toExtensionRestriction, type DatabaseRestriction } from "@/lib/extension-contract";
 import { pairExtensionSchema } from "@/lib/schemas";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { consumeRateLimit, requestAddress } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -18,6 +19,13 @@ function unavailable() {
 
 export async function POST(request: Request) {
   if (!isExtensionServerConfigured()) return unavailable();
+  const rate = consumeRateLimit(`pair:${requestAddress(request)}`, 20, 60_000);
+  if (!rate.allowed) {
+    return NextResponse.json({ error: "Too many pairing attempts. Please wait before trying again." }, {
+      status: 429,
+      headers: { "Retry-After": String(rate.retryAfterSeconds) },
+    });
+  }
   const parsed = pairExtensionSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: "Enter a valid six-digit pairing code." }, { status: 400 });
 

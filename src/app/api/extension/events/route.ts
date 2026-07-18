@@ -12,6 +12,7 @@ import {
 } from "@/lib/extension-contract";
 import { extensionEventSchema } from "@/lib/schemas";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { consumeRateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -49,6 +50,13 @@ export async function POST(request: Request) {
   }
   const connection = await getExtensionConnection(request);
   if (!connection) return NextResponse.json({ error: "Unauthorized browser connection." }, { status: 401 });
+  const rate = consumeRateLimit(`events:${connection.user_id}:${connection.id}`, 180, 60_000);
+  if (!rate.allowed) {
+    return NextResponse.json({ error: "Too many extension events. Please retry shortly." }, {
+      status: 429,
+      headers: { "Retry-After": String(rate.retryAfterSeconds) },
+    });
+  }
 
   const parsed = extensionEventSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: "Invalid extension event." }, { status: 400 });

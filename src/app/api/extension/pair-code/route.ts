@@ -4,6 +4,7 @@ import { getCurrentUser } from "@/lib/auth";
 import { createPairingCode, hashPairingCode, isExtensionServerConfigured } from "@/lib/extension-auth";
 import { createPairingCodeSchema } from "@/lib/schemas";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { consumeRateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -15,6 +16,13 @@ export async function POST(request: Request) {
   if (!isExtensionServerConfigured()) return unavailable();
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const rate = consumeRateLimit(`pair-code:${user.id}`, 6, 10 * 60_000);
+  if (!rate.allowed) {
+    return NextResponse.json({ error: "Too many pairing codes requested. Please wait before generating another." }, {
+      status: 429,
+      headers: { "Retry-After": String(rate.retryAfterSeconds) },
+    });
+  }
 
   const parsed = createPairingCodeSchema.safeParse(await request.json().catch(() => ({})));
   if (!parsed.success) return NextResponse.json({ error: "Invalid device label." }, { status: 400 });

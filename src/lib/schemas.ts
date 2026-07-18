@@ -5,7 +5,7 @@ import { STRATEGIES, TONES } from "@/lib/types";
 const hostnamePattern = /^(?=.{1,253}$)(?!-)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
 
 export function normalizeDomain(input: string): string | null {
-  const candidate = input.trim().toLowerCase();
+  const candidate = input.trim().toLowerCase().replace(/^www\./, "");
   if (!candidate || candidate.includes("@") || candidate.includes("/")) {
     return null;
   }

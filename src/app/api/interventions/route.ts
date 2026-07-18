@@ -5,6 +5,7 @@ import { generateIntervention } from "@/lib/intervention-generator";
 import { interventionRequestSchema } from "@/lib/schemas";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Strategy, Tone } from "@/lib/types";
+import { consumeRateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -17,6 +18,13 @@ export async function POST(request: Request) {
   }
   const connection = await getExtensionConnection(request);
   if (!connection) return NextResponse.json({ error: "Unauthorized browser connection." }, { status: 401 });
+  const rate = consumeRateLimit(`intervention:${connection.user_id}:${connection.id}`, 12, 60_000);
+  if (!rate.allowed) {
+    return NextResponse.json({ error: "Too many intervention requests. Please wait before trying again." }, {
+      status: 429,
+      headers: { "Retry-After": String(rate.retryAfterSeconds) },
+    });
+  }
 
   const parsed = interventionRequestSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: "Invalid intervention request." }, { status: 400 });
