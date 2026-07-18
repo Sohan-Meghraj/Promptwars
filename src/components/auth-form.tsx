@@ -9,6 +9,11 @@ import { Brand } from "@/components/brand";
 import { createClient } from "@/lib/supabase/client";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 
+const DEMO_CREDENTIALS = {
+  email: "demo@scrollgate.test",
+  password: "ScrollGateDemo2026!",
+};
+
 export function AuthForm({ mode }: { mode: "sign-in" | "sign-up" }) {
   const router = useRouter();
   const [email, setEmail] = useState("");
@@ -18,6 +23,13 @@ export function AuthForm({ mode }: { mode: "sign-in" | "sign-up" }) {
   const [status, setStatus] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const signingUp = mode === "sign-up";
+
+  function fillDemoCredentials() {
+    setEmail(DEMO_CREDENTIALS.email);
+    setPassword(DEMO_CREDENTIALS.password);
+    setError(null);
+    setStatus(null);
+  }
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -82,6 +94,21 @@ export function AuthForm({ mode }: { mode: "sign-in" | "sign-up" }) {
             {status && <p className="notice" role="status">{status}</p>}
             <button className="button-primary" type="submit" disabled={pending}>{pending && <LoaderCircle size={17} className="animate-spin" />} {signingUp ? "Create account" : "Sign in"}</button>
           </form>
+          {!signingUp ? (
+            <section className="demo-credentials" aria-labelledby="demo-credentials-title">
+              <div className="demo-credentials-header">
+                <div>
+                  <p id="demo-credentials-title">Demo account</p>
+                  <span>Explore ScrollGate with a test profile.</span>
+                </div>
+                <button type="button" className="demo-fill-button" onClick={fillDemoCredentials} disabled={pending}>Use demo</button>
+              </div>
+              <dl>
+                <div><dt>Email</dt><dd>{DEMO_CREDENTIALS.email}</dd></div>
+                <div><dt>Password</dt><dd>{DEMO_CREDENTIALS.password}</dd></div>
+              </dl>
+            </section>
+          ) : null}
           <p className="auth-switch">{signingUp ? "Already have an account?" : "New to ScrollGate?"} <Link href={signingUp ? "/sign-in" : "/sign-up"}>{signingUp ? "Sign in" : "Create an account"}</Link></p>
         </div>
       </section>
