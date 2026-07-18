@@ -8,6 +8,11 @@ function formatActivityTime(value: string) {
   return new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit" }).format(new Date(value));
 }
 
+function formatBrowserSync(value: string | null) {
+  if (!value) return "Paired, awaiting its first sync.";
+  return `Last synced ${new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value))}.`;
+}
+
 export default async function TodayPage() {
   const dashboard = await getTodayDashboard();
 
@@ -44,7 +49,7 @@ export default async function TodayPage() {
 
           <section className="content-section" aria-labelledby="insights-title">
             <div className="section-heading"><h2 id="insights-title">Insights</h2><Link className="section-link" href="/insights">Open insights <ArrowRight size={15} /></Link></div>
-            <div className="insight-empty"><div><LineChart size={27} /></div><p>Complete a few more interventions before ScrollGate compares strategies.</p></div>
+            <div className="insight-empty"><div><LineChart size={27} /></div><p>ScrollGate compares strategies only after it has enough resolved, real intervention outcomes.</p></div>
           </section>
 
           <section className="content-section" aria-labelledby="activity-title">
@@ -64,8 +69,8 @@ export default async function TodayPage() {
         </div>
 
         <aside className="context-rail" aria-label="Focus context">
-          <div className="context-card"><MonitorCog size={25} aria-hidden="true" /><h2>Connected browser</h2><strong>Not connected yet</strong><p>Connect the Chrome extension to enforce active rules before a distracting site loads.</p><Link className="context-link" href="/browsers">Connect a browser</Link></div>
-          <div className="context-card"><h2>Today, honestly</h2><div className="metric-list"><div className="metric-line"><span>Blocked attempts</span><strong>—</strong></div><div className="metric-line"><span>Returns to focus</span><strong>—</strong></div><div className="metric-line"><span>Intentional access</span><strong>—</strong></div></div><p>Metrics stay blank until ScrollGate records real events.</p></div>
+          <div className="context-card"><MonitorCog size={25} aria-hidden="true" /><h2>Connected browser</h2><strong>{dashboard.connectedBrowser?.nickname ?? "No browser paired"}</strong><p>{dashboard.connectedBrowser ? formatBrowserSync(dashboard.connectedBrowser.lastSyncedAt ?? dashboard.connectedBrowser.lastSeenAt) : "Connect the Chrome extension to enforce active rules before a distracting site loads."}</p><Link className="context-link" href="/browsers">{dashboard.connectedBrowser ? "Manage browsers" : "Connect a browser"}</Link></div>
+          <div className="context-card"><h2>Recorded so far</h2><div className="metric-list"><div className="metric-line"><span>Blocked attempts</span><strong>{dashboard.metrics.attempts}</strong></div><div className="metric-line"><span>Returns to focus</span><strong>{dashboard.metrics.returnsToFocus}</strong></div><div className="metric-line"><span>Intentional access</span><strong>{dashboard.metrics.intentionalAccess}</strong></div></div><p>{dashboard.metrics.attempts ? "These totals come only from synchronized extension events." : "Complete your first ScrollGate intervention to begin seeing patterns."}</p></div>
         </aside>
       </div>
     </div>
